@@ -8,7 +8,7 @@ import { connect, disconnect, getAdapter, isConnected } from '../protocols/proto
 import { getSession } from '../sessions/store.js';
 import { getCredential } from '../credentials/keytar.js';
 import fs from 'fs/promises';
-import { unlink, rmdir } from 'fs/promises';
+import { unlink } from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
@@ -175,14 +175,11 @@ export function registerFilesIpc() {
 	 */
 	ipcMain.handle('files:deleteLocal', async (_, filePath) => {
 		assertSafePath(filePath, [os.homedir(), os.tmpdir()]);
-		try {
+		const stat = await fs.lstat(filePath);
+		if (stat.isDirectory()) {
+			await fs.rm(filePath, { recursive: true });
+		} else {
 			await unlink(filePath);
-		} catch (e) {
-			if (e.code === 'EISDIR') {
-				await rmdir(filePath, { recursive: true });
-			} else {
-				throw e;
-			}
 		}
 	});
 }
