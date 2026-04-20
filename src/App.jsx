@@ -1,0 +1,280 @@
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { useConnection } from './hooks/useMacscpApi.js';
+import LocalPane from './panes/LocalPane.jsx';
+import RemotePane from './panes/RemotePane.jsx';
+import TransferQueue from './transfer/TransferQueue.jsx';
+
+const styles = {
+	root: {
+		display: 'flex',
+		flexDirection: 'column',
+		height: '100%',
+		width: '100%',
+		background: '#f0f0f0',
+		fontFamily: '-apple-system, BlinkMacSystemFont, \'Helvetica Neue\', sans-serif',
+		overflow: 'hidden',
+	},
+	toolbar: {
+		display: 'flex',
+		alignItems: 'center',
+		padding: '6px 14px',
+		background: '#e0e0e0',
+		borderBottom: '1px solid #b8b8b8',
+		gap: '12px',
+		flexShrink: 0,
+	},
+	toolbarTitle: {
+		fontSize: '14px',
+		fontWeight: '700',
+		color: '#222',
+		margin: 0,
+	},
+	toolbarStatus: {
+		fontSize: '12px',
+		color: '#666',
+	},
+	panesRow: {
+		flex: 1,
+		display: 'flex',
+		flexDirection: 'row',
+		overflow: 'hidden',
+		minHeight: 0,
+		width: '100%',
+	},
+	divider: {
+		width: '4px',
+		background: '#c0c0c0',
+		cursor: 'col-resize',
+		flexShrink: 0,
+		transition: 'background 0.15s',
+	},
+};
+
+/**
+ * アプリケーションルートコンポーネント
+ * デュアルペイン（LocalPane + RemotePane）と TransferQueue を管理する
+ * @returns {JSX.Element}
+ */
+export default function App() {
+	const [sessions, setSessions] = useState([]);
+	const { connectedSessions, connect, disconnect } = useConnection();
+
+	/** 転送キューのアイテム一覧 */
+	const [transferItems, setTransferItems] = useState([]);
+
+	/** 最後に完了した転送バッチ: { id, direction, destPath, sessionId?, names } */
+	const [lastTransferBatch, setLastTransferBatch] = useState(null);
+
+	/** 内部クリップボード: { entries, sourcePath, source, sessionId? } */
+	const [clipboard, setClipboard] = useState(null);
+
+	/** ドラッグソース: 'local' | 'remote' | null */
+	const [dragSource, setDragSource] = useState(null);
+
+	/** ドラッグ終了タイマー */
+	const dragEndTimer = useRef(null);
+
+	/** セッション一覧取得 */
+	const fetchSessions = useCallback(async () => {
+		try {
+			const list = await window.macscp.sessions.list();
+			setSessions(list);
+		} catch (err) {
+			console.error('セッション一覧の取得に失敗しました:', err);
+		}
+	}, []);
+
+	useEffect(() => {
+		fetchSessions();
+	}, [fetchSessions]);
+
+	/** 転送進捗の受信登録 */
+	useEffect(() => {
+		window.macscp.files.onProgress((data) => {
+			setTransferItems(prev =>
+				prev.map(item =>
+					item.name === data.name && item.status === 'transferring'
+						? { ...item, transferred: data.transferred, total: data.total }
+						: item
+				)
+			);
+		});
+	}, []);
+
+	/**
+	 * 転送キューにアイテムを追加する
+	 * @param {string} name - ファイル名
+	 * @param {'upload'|'download'} direction
+	 * @returns {string} - 追加アイテムの ID
+	 */
+	const addTransferItem = useCallback((name, direction) => {
+		const id = `${Date.now()}-${Math.random()}`;
+		setTransferItems(prev => [
+			...prev,
+			{ id, name, direction, transferred: 0, total: 0, status: 'pending' },
+		]);
+		return id;
+	}, []);
+
+	/**
+	 * 転送キューのアイテムのステータスを更新する
+	 * @param {string} id
+	 * @param {string} status
+	 */
+	const updateTransferStatus = useCallback((id, status) => {
+		setTransferItems(prev =>
+			prev.map(item => item.id === id ? { ...item, status } : item)
+		);
+	}, []);
+
+	/**
+	 * ローカル → リモートへアップロードする
+	 * @param {Array<Object>} localEntries - ローカルファイルエントリ
+	 * @param {string} remotePath - アップロード先リモートパス
+	 * @param {string} sessionId
+	 */
+	const handleUpload = useCallback(async (localEntries, remotePath, sessionId) => {
+		if (!sessionId || !connectedSessions[sessionId]) {
+			alert('リモートセッションに接続してください。');
+			return;
+		}
+		const successNames = [];
+		for (const entry of localEntries) {
+			if (entry.isDirectory) continue;
+			const id = addTransferItem(entry.name, 'upload');
+			updateTransferStatus(id, 'transferring');
+			try {
+				const dest = remotePath
+					? `${remotePath.replace(/\/$/, '')}/${entry.name}`
+					: `/${entry.name}`;
+				await window.macscp.files.upload(sessionId, entry.path, dest);
+				updateTransferStatus(id, 'done');
+				successNames.push(entry.name);
+			} catch (err) {
+				updateTransferStatus(id, 'error');
+				console.error(`アップロードに失敗しました (${entry.name}):`, err);
+			}
+		}
+		if (successNames.length > 0) {
+			setLastTransferBatch({ id: Date.now(), direction: 'upload', destPath: remotePath, sessionId, names: successNames });
+		}
+	}, [connectedSessions, addTransferItem, updateTransferStatus]);
+
+	/**
+	 * リモート → ローカルへダウンロードする
+	 * @param {Array<Object>} remoteEntries - リモートファイルエントリ（sessionId, remotePath を含む）
+	 * @param {string} localDir - ダウンロード先ローカルディレクトリ
+	 */
+	const handleDownload = useCallback(async (remoteEntries, localDir) => {
+		const successNames = [];
+		for (const entry of remoteEntries) {
+			if (entry.isDirectory) continue;
+			const id = addTransferItem(entry.name, 'download');
+			updateTransferStatus(id, 'transferring');
+			try {
+				const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
+				await window.macscp.files.download(entry.sessionId, entry.remotePath, dest);
+				updateTransferStatus(id, 'done');
+				successNames.push(entry.name);
+			} catch (err) {
+				updateTransferStatus(id, 'error');
+				console.error(`ダウンロードに失敗しました (${entry.name}):`, err);
+			}
+		}
+		if (successNames.length > 0) {
+			setLastTransferBatch({ id: Date.now(), direction: 'download', destPath: localDir, names: successNames });
+		}
+	}, [addTransferItem, updateTransferStatus]);
+
+	/**
+	 * 完了・エラーアイテムをキューからクリアする
+	 */
+	const handleClearQueue = useCallback(() => {
+		setTransferItems(prev =>
+			prev.filter(item => item.status !== 'done' && item.status !== 'error')
+		);
+	}, []);
+
+	/** ドラッグ開始: ソース記録 */
+	const handleLocalDragStart = useCallback(() => {
+		setDragSource('local');
+	}, []);
+
+	const handleRemoteDragStart = useCallback(() => {
+		setDragSource('remote');
+	}, []);
+
+	/** ドロップ後にドラッグソースをリセット */
+	const resetDragSource = useCallback(() => {
+		if (dragEndTimer.current) clearTimeout(dragEndTimer.current);
+		dragEndTimer.current = setTimeout(() => setDragSource(null), 300);
+	}, []);
+
+	/**
+	 * LocalPane → RemotePane へドロップ（アップロード）
+	 * @param {Array<Object>} localEntries
+	 * @param {string} remotePath
+	 * @param {string} sessionId
+	 */
+	const handleDropToRemote = useCallback(async (localEntries, remotePath, sessionId) => {
+		resetDragSource();
+		await handleUpload(localEntries, remotePath, sessionId);
+	}, [handleUpload, resetDragSource]);
+
+	/**
+	 * RemotePane → LocalPane へドロップ（ダウンロード）
+	 * @param {Array<Object>} remoteEntries
+	 * @param {string} localDir
+	 */
+	const handleDropToLocal = useCallback(async (remoteEntries, localDir) => {
+		resetDragSource();
+		await handleDownload(remoteEntries, localDir);
+	}, [handleDownload, resetDragSource]);
+
+	/** 接続中セッション数の表示テキスト */
+	const connectedCount = Object.keys(connectedSessions).length;
+	const statusText = connectedCount > 0
+		? `${connectedCount} セッション接続中`
+		: '未接続';
+
+	return (
+		<div style={styles.root}>
+			{/* ツールバー */}
+			<div style={styles.toolbar}>
+				<span style={styles.toolbarTitle}>MacSCP</span>
+				<span style={styles.toolbarStatus}>{statusText}</span>
+			</div>
+
+			{/* デュアルペイン */}
+			<div style={styles.panesRow}>
+				<LocalPane
+					clipboard={clipboard}
+					onClipboardChange={setClipboard}
+					onDragStart={handleLocalDragStart}
+					onDropFromRemote={handleDropToLocal}
+					dragSource={dragSource}
+					lastTransferBatch={lastTransferBatch}
+				/>
+
+				<div style={styles.divider} />
+
+				<RemotePane
+					sessions={sessions}
+					onSessionsChange={fetchSessions}
+					clipboard={clipboard}
+					onClipboardChange={setClipboard}
+					onDragStart={handleRemoteDragStart}
+					onDropFromLocal={handleDropToRemote}
+					dragSource={dragSource}
+					connectedSessions={connectedSessions}
+					onConnect={connect}
+					onDisconnect={disconnect}
+					lastTransferBatch={lastTransferBatch}
+				/>
+			</div>
+
+			{/* 転送キュー */}
+			<TransferQueue items={transferItems} onClear={handleClearQueue} />
+		</div>
+	);
+}

@@ -1,0 +1,51 @@
+name: Build macOS DMG
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: macos-latest
+
+        steps:
+            - name: チェックアウト
+              uses: actions/checkout@v4
+
+            - name: Node.js セットアップ
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: 'npm'
+
+            - name: 依存関係インストール
+              run: npm ci
+
+            - name: Renderer ビルド
+              run: npm run build
+
+            - name: macOS DMG ビルド・署名・notarization
+              env:
+                  APPLE_ID: ${{ secrets.APPLE_ID }}
+                  APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+                  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+                  CSC_LINK: ${{ secrets.CSC_LINK }}
+                  CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+              run: npx electron-builder --mac --publish never
+
+            - name: DMG アーティファクトをアップロード
+              uses: actions/upload-artifact@v4
+              with:
+                  name: MacSCP-dmg
+                  path: release/*.dmg
+                  retention-days: 30
+
+            - name: リリースに DMG をアタッチ（タグ push 時のみ）
+              if: startsWith(github.ref, 'refs/tags/')
+              uses: softprops/action-gh-release@v1
+              with:
+                  files: release/*.dmg
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

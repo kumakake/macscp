@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+.env
+.env.local
+*.log
+.DS_Store
+books/
+claudedocs/
+plans/
+test-results/
+.serena/
+evi/

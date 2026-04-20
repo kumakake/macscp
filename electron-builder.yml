@@ -1,0 +1,47 @@
+appId: com.kumakake.macscp
+productName: MacSCP
+copyright: Copyright © 2024 kumakake
+
+directories:
+    output: release
+    buildResources: build
+
+files:
+    - dist/**/*
+    - electron/**/*
+    - shared/**/*
+    - package.json
+
+extraResources:
+    - from: build/entitlements.mac.plist
+      to: entitlements.mac.plist
+
+mac:
+    category: public.app-category.utilities
+    target:
+        - target: dmg
+          arch:
+              - arm64
+    hardenedRuntime: false
+    gatekeeperAssess: false
+    identity: null
+
+afterSign: scripts/notarize.cjs
+
+dmg:
+    title: MacSCP ${version}
+    contents:
+        - x: 410
+          y: 150
+          type: link
+          path: /Applications
+        - x: 130
+          y: 150
+          type: file
+    window:
+        width: 540
+        height: 380
+
+nsis:
+    oneClick: false
+    allowToChangeInstallationDirectory: true
