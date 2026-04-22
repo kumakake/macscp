@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('macscp', {
 		rename: (sessionId, oldPath, newPath) => ipcRenderer.invoke('files:rename', sessionId, oldPath, newPath),
 		deleteLocal: (filePath) => ipcRenderer.invoke('files:deleteLocal', filePath),
 		mkdirLocal: (dirPath) => ipcRenderer.invoke('files:mkdirLocal', dirPath),
+		renameLocal: (oldPath, newPath) => ipcRenderer.invoke('files:renameLocal', oldPath, newPath),
 		onProgress: (callback) => {
 			const handler = (_, data) => callback(data);
 			ipcRenderer.on('files:progress', handler);

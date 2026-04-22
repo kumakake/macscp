@@ -182,4 +182,14 @@ export function registerFilesIpc() {
 			await unlink(filePath);
 		}
 	});
+
+	/**
+	 * ローカルのファイル/ディレクトリ名を変更する
+	 */
+	ipcMain.handle('files:renameLocal', async (_, oldPath, newPath) => {
+		assertSafePath(oldPath, [os.homedir(), os.tmpdir()]);
+		assertSafePath(newPath, [os.homedir(), os.tmpdir()]);
+		await fs.rename(oldPath, newPath);
+		return { ok: true };
+	});
 }

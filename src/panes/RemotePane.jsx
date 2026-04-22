@@ -265,6 +265,11 @@ export default function RemotePane({
 	const [mkdirName, setMkdirName] = useState('');
 	const [mkdirError, setMkdirError] = useState('');
 
+	const [showRenameModal, setShowRenameModal] = useState(false);
+	const [renameOldName, setRenameOldName] = useState('');
+	const [renameNewName, setRenameNewName] = useState('');
+	const [renameError, setRenameError] = useState('');
+
 	/** セッションエディタモーダル */
 	const [showEditor, setShowEditor] = useState(false);
 	const [editingSession, setEditingSession] = useState(null);
@@ -610,10 +615,60 @@ export default function RemotePane({
 	}, [mkdirName, currentPath, selectedSessionId, loadRemote]);
 
 	/**
+	 * 選択中のリモートファイル/ディレクトリを削除する
+	 */
+	const deleteSelected = useCallback(async () => {
+		if (selected.length === 0) return;
+		const names = selected.map(s => s.name).join(', ');
+		if (!window.confirm(`以下のファイルをリモートから削除しますか？\n${names}`)) return;
+		for (const entry of selected) {
+			const rp = entry.path ?? `${currentPath}/${entry.name}`;
+			try {
+				await window.macscp.files.rm(selectedSessionId, rp);
+			} catch (err) {
+				alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
+			}
+		}
+		await navigateTo(currentPath);
+	}, [selected, currentPath, selectedSessionId, navigateTo]);
+
+	/**
+	 * リネームモーダルを開く
+	 * @param {Object} entry
+	 */
+	const openRenameModal = useCallback((entry) => {
+		setRenameOldName(entry.name);
+		setRenameNewName(entry.name);
+		setRenameError('');
+		setShowRenameModal(true);
+		setContextMenu(null);
+	}, []);
+
+	/**
+	 * リモートファイル/ディレクトリの名前を変更する
+	 */
+	const handleRename = useCallback(async () => {
+		const trimmed = renameNewName.trim();
+		if (!trimmed || trimmed === renameOldName) { setShowRenameModal(false); return; }
+		const base = currentPath.endsWith('/') ? currentPath : currentPath + '/';
+		const oldPath = base + renameOldName;
+		const newPath = base + trimmed;
+		try {
+			await window.macscp.files.rename(selectedSessionId, oldPath, newPath);
+			setShowRenameModal(false);
+			setRenameError('');
+			await loadRemote(selectedSessionId, currentPath);
+		} catch (err) {
+			setRenameError(err.message);
+		}
+	}, [renameNewName, renameOldName, currentPath, selectedSessionId, loadRemote]);
+
+	/**
 	 * キーボードショートカット処理（フォーカス時のみ）
 	 * @param {React.KeyboardEvent} e
 	 */
 	const handleKeyDown = useCallback((e) => {
+		if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 		// ⌘C または F5: 選択ファイルをコピー
 		if ((e.metaKey && e.key === 'c') || e.key === 'F5') {
 			if (selected.length > 0) {
@@ -637,23 +692,10 @@ export default function RemotePane({
 			return;
 		}
 		// Delete: リモート削除
-		if ((e.key === 'Delete' || e.key === 'Backspace') && selected.length > 0) {
-			const names = selected.map(s => s.name).join(', ');
-			if (window.confirm(`以下のファイルをリモートから削除しますか？\n${names}`)) {
-				(async () => {
-					for (const entry of selected) {
-						const rp = entry.path ?? `${currentPath}/${entry.name}`;
-						try {
-							await window.macscp.files.rm(selectedSessionId, rp);
-						} catch (err) {
-							alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
-						}
-					}
-					await navigateTo(currentPath);
-				})();
-			}
+		if (e.key === 'Delete' || e.key === 'Backspace') {
+			deleteSelected();
 		}
-	}, [selected, currentPath, selectedSessionId, isConnected, onClipboardChange, navigateTo]);
+	}, [selected, currentPath, selectedSessionId, isConnected, onClipboardChange, navigateTo, deleteSelected]);
 
 	return (
 		<div
@@ -691,6 +733,22 @@ export default function RemotePane({
 							✎ エディタで編集
 						</div>
 					)}
+					<div
+						style={styles.contextMenuItem}
+						onMouseEnter={e => { e.currentTarget.style.background = '#e8f0ff'; }}
+						onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+						onClick={() => openRenameModal(contextMenu.entry)}
+					>
+						✎ 名前変更
+					</div>
+					<div
+						style={{ ...styles.contextMenuItem, color: '#c62828' }}
+						onMouseEnter={e => { e.currentTarget.style.background = '#fff0f0'; }}
+						onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+						onClick={() => { closeContextMenu(); deleteSelected(); }}
+					>
+						✕ 削除
+					</div>
 				</div>
 			)}
 			{/* セッション新規作成モーダル */}
@@ -823,7 +881,89 @@ export default function RemotePane({
 						>
 							＋
 						</button>
+						<button
+							style={{
+								...styles.refreshButton,
+								opacity: selected.length !== 1 ? 0.4 : 1,
+								cursor: selected.length !== 1 ? 'not-allowed' : 'pointer',
+							}}
+							disabled={selected.length !== 1}
+							onClick={() => selected.length === 1 && openRenameModal(selected[0])}
+							title='名前変更'
+						>
+							✎
+						</button>
+						<button
+							style={{
+								...styles.refreshButton,
+								opacity: selected.length === 0 ? 0.4 : 1,
+								cursor: selected.length === 0 ? 'not-allowed' : 'pointer',
+							}}
+							disabled={selected.length === 0}
+							onClick={deleteSelected}
+							title='削除'
+						>
+							✕
+						</button>
 					</div>
+
+					{/* 名前変更モーダル */}
+					{showRenameModal && (
+						<div style={{
+							position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+							display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+						}} onClick={() => setShowRenameModal(false)}>
+							<div style={{
+								background: '#1e1e2e', borderRadius: '8px', width: '360px',
+								padding: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+							}} onClick={e => e.stopPropagation()}>
+								<div style={{ color: '#cdd6f4', fontSize: '14px', fontWeight: '600', marginBottom: '16px' }}>
+									名前変更
+								</div>
+								<input
+									style={{
+										width: '100%', boxSizing: 'border-box',
+										background: '#313244', border: '1px solid #45475a',
+										borderRadius: '4px', padding: '6px 10px',
+										color: '#cdd6f4', fontSize: '13px', outline: 'none', marginBottom: '8px',
+									}}
+									value={renameNewName}
+									onChange={e => { setRenameNewName(e.target.value); setRenameError(''); }}
+									onKeyDown={e => {
+										if (e.key === 'Enter') handleRename();
+										if (e.key === 'Escape') setShowRenameModal(false);
+									}}
+									autoFocus
+								/>
+								{renameError && (
+									<div style={{ color: '#f38ba8', fontSize: '12px', marginBottom: '8px' }}>
+										{renameError}
+									</div>
+								)}
+								<div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+									<button
+										style={{
+											background: '#45475a', color: '#cdd6f4', border: 'none',
+											borderRadius: '4px', padding: '6px 16px', fontSize: '13px', cursor: 'pointer',
+										}}
+										onClick={() => setShowRenameModal(false)}
+									>
+										キャンセル
+									</button>
+									<button
+										style={{
+											background: '#89b4fa', color: '#1e1e2e', border: 'none',
+											borderRadius: '4px', padding: '6px 16px', fontSize: '13px',
+											fontWeight: '600', cursor: 'pointer',
+										}}
+										onClick={handleRename}
+									>
+										変更
+									</button>
+								</div>
+							</div>
+						</div>
+					)}
 
 					{/* 新規フォルダ作成モーダル */}
 					{showMkdirModal && (
