@@ -5,7 +5,16 @@
 
 import SftpClient from 'ssh2-sftp-client';
 import { statSync } from 'fs';
+import fs from 'fs/promises';
+import path from 'path';
 import { buildConnectOptions } from './connect-options.js';
+import {
+	walkLocalDir,
+	walkRemoteDir,
+	assertSafeChild,
+	joinPosix,
+	throttleProgress,
+} from './walk-helpers.js';
 
 /**
  * ssh2-sftp-client の stat オブジェクトを FileEntry に変換する
@@ -227,6 +236,202 @@ export function createSftpAdapter() {
 				await client.rename(oldPath, newPath);
 			} catch (err) {
 				throw new Error(`リネームに失敗しました (${oldPath} → ${newPath}): ${err.message}`);
+			}
+		},
+
+		/**
+		 * ローカルディレクトリをリモートへ再帰的にアップロードする
+		 * @param {string} localDir - アップロード元ローカルディレクトリの絶対パス
+		 * @param {string} remoteDir - アップロード先リモートディレクトリのパス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async putDirectory(localDir, remoteDir, onProgress) {
+			// ローカルディレクトリを事前スキャンして転送量を把握する
+			const { files, dirs, totalBytes } = await walkLocalDir(localDir);
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			// リモートにディレクトリ構造を先に作成する
+			await client.mkdir(remoteDir, true);
+			for (const relDir of dirs) {
+				const remotePath = joinPosix(remoteDir, relDir);
+				try {
+					await client.mkdir(remotePath, true);
+				} catch (err) {
+					throw new Error(`リモートディレクトリ作成に失敗しました (${remotePath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次アップロードする
+			for (const { relPath, absPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// 進捗コールバックを throttle して高頻度の呼び出しを間引く
+				const throttledProgress = onProgress
+					? throttleProgress((transferred, total) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred,
+							total,
+							processedFiles,
+							processedBytes: fileStartBytes + transferred,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				try {
+					await client.fastPut(absPath, remotePath, {
+						chunkSize: 32768,
+						concurrency: 1,
+						step: (totalTransferred, _chunk, totalSize) => {
+							if (throttledProgress) {
+								throttledProgress(totalTransferred, totalSize > 0 ? totalSize : size);
+							}
+						},
+					});
+				} catch (err) {
+					throw new Error(`ファイルのアップロードに失敗しました (${absPath} → ${remotePath}): ${err.message}`);
+				}
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
+			}
+		},
+
+		/**
+		 * リモートディレクトリをローカルへ再帰的にダウンロードする
+		 * @param {string} remoteDir - ダウンロード元リモートディレクトリのパス
+		 * @param {string} localDir - ダウンロード先ローカルディレクトリの絶対パス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async getDirectory(remoteDir, localDir, onProgress) {
+			// adapter オブジェクト（this の代わりに自身への参照）
+			const adapterRef = {
+				list: async (remotePath) => {
+					const items = await client.list(remotePath);
+					return items.map((item) => ({
+						name: item.name,
+						type: item.type,
+						size: item.size ?? 0,
+					}));
+				},
+			};
+
+			// リモートディレクトリを事前スキャンして転送量を把握する
+			const { files, dirs, totalBytes } = await walkRemoteDir(adapterRef, remoteDir);
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			// ローカルにディレクトリ構造を先に作成する
+			await fs.mkdir(localDir, { recursive: true });
+			for (const relDir of dirs) {
+				const localAbsPath = path.join(localDir, relDir);
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+				try {
+					await fs.mkdir(localAbsPath, { recursive: true });
+				} catch (err) {
+					throw new Error(`ローカルディレクトリ作成に失敗しました (${localAbsPath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次ダウンロードする
+			for (const { relPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const localAbsPath = path.join(localDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+
+				// 進捗コールバックを throttle して高頻度の呼び出しを間引く
+				const throttledProgress = onProgress
+					? throttleProgress((transferred, total) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred,
+							total,
+							processedFiles,
+							processedBytes: fileStartBytes + transferred,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				try {
+					await client.fastGet(remotePath, localAbsPath, {
+						chunkSize: 32768,
+						concurrency: 1,
+						step: (totalTransferred, _chunk, totalSize) => {
+							if (throttledProgress) {
+								throttledProgress(totalTransferred, totalSize > 0 ? totalSize : size);
+							}
+						},
+					});
+				} catch (err) {
+					throw new Error(`ファイルのダウンロードに失敗しました (${remotePath} → ${localAbsPath}): ${err.message}`);
+				}
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
 			}
 		},
 	};

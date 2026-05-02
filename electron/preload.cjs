@@ -24,8 +24,12 @@ contextBridge.exposeInMainWorld('macscp', {
 		list: (sessionId, remotePath) => ipcRenderer.invoke('files:list', sessionId, remotePath),
 		listLocal: (dirPath) => ipcRenderer.invoke('files:listLocal', dirPath),
 		homeDir: () => ipcRenderer.invoke('files:homeDir'),
-		download: (sessionId, remotePath, localPath) => ipcRenderer.invoke('files:download', sessionId, remotePath, localPath),
-		upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('files:upload', sessionId, localPath, remotePath),
+		download: (sessionId, remotePath, localPath, transferId) => ipcRenderer.invoke('files:download', sessionId, remotePath, localPath, transferId),
+		upload: (sessionId, localPath, remotePath, transferId) => ipcRenderer.invoke('files:upload', sessionId, localPath, remotePath, transferId),
+		uploadDirectory: (sessionId, localDir, remoteDir, transferId) =>
+			ipcRenderer.invoke('files:uploadDirectory', sessionId, localDir, remoteDir, transferId),
+		downloadDirectory: (sessionId, remoteDir, localDir, transferId) =>
+			ipcRenderer.invoke('files:downloadDirectory', sessionId, remoteDir, localDir, transferId),
 		mkdir: (sessionId, remotePath) => ipcRenderer.invoke('files:mkdir', sessionId, remotePath),
 		rm: (sessionId, remotePath) => ipcRenderer.invoke('files:rm', sessionId, remotePath),
 		rename: (sessionId, oldPath, newPath) => ipcRenderer.invoke('files:rename', sessionId, oldPath, newPath),

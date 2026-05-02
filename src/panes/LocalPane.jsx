@@ -161,7 +161,7 @@ const styles = {
  * @param {string|null} props.dragSource - 現在ドラッグ中のソース ('local'|'remote'|null)
  * @param {Object|null} props.lastTransferBatch - 最後に完了した転送バッチ { id, direction, destPath, names }
  */
-export default function LocalPane({ clipboard, onClipboardChange, onDragStart, onDropFromRemote, dragSource, lastTransferBatch }) {
+export default function LocalPane({ clipboard, onClipboardChange, onDragStart, onDropFromRemote, dragSource, lastTransferBatch, onDeleteLocal }) {
 	const { entries, currentPath, loading, error, loadLocal } = useFileList();
 	const [selected, setSelected] = useState([]);
 	const [pathInput, setPathInput] = useState('');
@@ -325,16 +325,20 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 		if (selected.length === 0) return;
 		const names = selected.map(s => s.name).join(', ');
 		if (!window.confirm(`削除しますか？\n${names}`)) return;
-		for (const entry of selected) {
-			try {
-				await window.macscp.files.deleteLocal(entry.path);
-			} catch (err) {
-				alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
+		setSelected([]);
+		if (onDeleteLocal) {
+			await onDeleteLocal(selected);
+		} else {
+			for (const entry of selected) {
+				try {
+					await window.macscp.files.deleteLocal(entry.path);
+				} catch (err) {
+					alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
+				}
 			}
 		}
-		setSelected([]);
 		await loadLocal(currentPath);
-	}, [selected, currentPath, loadLocal]);
+	}, [selected, currentPath, loadLocal, onDeleteLocal]);
 
 	/**
 	 * ヘッダクリック時のソートトグル（null→asc→desc→null）
@@ -714,7 +718,7 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 							onClick={e => handleRowClick(e, entry)}
 							onDoubleClick={() => handleDoubleClick(entry)}
 							onContextMenu={e => handleContextMenu(e, entry)}
-							draggable={!entry.isDirectory}
+							draggable={true}
 							onDragStart={e => handleDragStart(e, entry)}
 						>
 							<div style={styles.nameCell(isSelected)}>

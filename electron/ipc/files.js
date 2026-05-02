@@ -113,11 +113,17 @@ export function registerFilesIpc() {
 	/**
 	 * リモートからローカルへファイルをダウンロードする
 	 * 進捗は 'files:progress' IPC イベントで通知する
+	 * @param {Electron.IpcMainInvokeEvent} event
+	 * @param {string} sessionId - セッション ID
+	 * @param {string} remotePath - リモートファイルパス
+	 * @param {string} localPath - 保存先ローカルパス
+	 * @param {string} [transferId] - 転送識別子（進捗通知に含める）
 	 */
-	ipcMain.handle('files:download', async (event, sessionId, remotePath, localPath) => {
+	ipcMain.handle('files:download', async (event, sessionId, remotePath, localPath, transferId) => {
 		assertSafePath(localPath, [os.homedir(), os.tmpdir()]);
 		await getAdapter(sessionId).download(remotePath, localPath, (transferred, total) => {
 			event.sender.send('files:progress', {
+				transferId,
 				name: path.basename(remotePath),
 				transferred,
 				total,
@@ -128,14 +134,58 @@ export function registerFilesIpc() {
 	/**
 	 * ローカルからリモートへファイルをアップロードする
 	 * 進捗は 'files:progress' IPC イベントで通知する
+	 * @param {Electron.IpcMainInvokeEvent} event
+	 * @param {string} sessionId - セッション ID
+	 * @param {string} localPath - アップロード元ローカルパス
+	 * @param {string} remotePath - 保存先リモートパス
+	 * @param {string} [transferId] - 転送識別子（進捗通知に含める）
 	 */
-	ipcMain.handle('files:upload', async (event, sessionId, localPath, remotePath) => {
+	ipcMain.handle('files:upload', async (event, sessionId, localPath, remotePath, transferId) => {
 		assertSafePath(localPath, [os.homedir(), os.tmpdir()]);
 		await getAdapter(sessionId).upload(localPath, remotePath, (transferred, total) => {
 			event.sender.send('files:progress', {
+				transferId,
 				name: path.basename(localPath),
 				transferred,
 				total,
+			});
+		});
+	});
+
+	/**
+	 * ローカルディレクトリをリモートへ再帰的にアップロードする
+	 * 進捗は 'files:progress' IPC イベントで通知する（DirectoryProgress 型）
+	 * @param {Electron.IpcMainInvokeEvent} event
+	 * @param {string} sessionId - セッション ID
+	 * @param {string} localDir - アップロード元ローカルディレクトリパス
+	 * @param {string} remoteDir - 保存先リモートディレクトリパス
+	 * @param {string} [transferId] - 転送識別子（進捗通知に含める）
+	 */
+	ipcMain.handle('files:uploadDirectory', async (event, sessionId, localDir, remoteDir, transferId) => {
+		assertSafePath(localDir, [os.homedir(), os.tmpdir()]);
+		await getAdapter(sessionId).putDirectory(localDir, remoteDir, (/** @type {import('../../shared/protocol-types.js').DirectoryProgress} */ progress) => {
+			event.sender.send('files:progress', {
+				transferId,
+				...progress,
+			});
+		});
+	});
+
+	/**
+	 * リモートディレクトリをローカルへ再帰的にダウンロードする
+	 * 進捗は 'files:progress' IPC イベントで通知する（DirectoryProgress 型）
+	 * @param {Electron.IpcMainInvokeEvent} event
+	 * @param {string} sessionId - セッション ID
+	 * @param {string} remoteDir - ダウンロード元リモートディレクトリパス
+	 * @param {string} localDir - 保存先ローカルディレクトリパス
+	 * @param {string} [transferId] - 転送識別子（進捗通知に含める）
+	 */
+	ipcMain.handle('files:downloadDirectory', async (event, sessionId, remoteDir, localDir, transferId) => {
+		assertSafePath(localDir, [os.homedir(), os.tmpdir()]);
+		await getAdapter(sessionId).getDirectory(remoteDir, localDir, (/** @type {import('../../shared/protocol-types.js').DirectoryProgress} */ progress) => {
+			event.sender.send('files:progress', {
+				transferId,
+				...progress,
 			});
 		});
 	});

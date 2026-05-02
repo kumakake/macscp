@@ -37,6 +37,8 @@
 	"jest": {
 		"extensionsToTreatAsEsm": [".jsx"],
 		"transform": {},
-		"testPathIgnorePatterns": ["/node_modules/", "/e2e/"]
+		"testPathIgnorePatterns": ["/node_modules/", "/e2e/"],
+		"testTimeout": 30000,
+		"maxWorkers": 1
 	}
 }

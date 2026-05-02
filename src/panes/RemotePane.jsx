@@ -249,6 +249,7 @@ export default function RemotePane({
 	onConnect,
 	onDisconnect,
 	lastTransferBatch,
+	onDeleteRemote,
 }) {
 	const { entries, currentPath, loading, error, loadRemote } = useFileList();
 	const [selectedSessionId, setSelectedSessionId] = useState('');
@@ -621,16 +622,24 @@ export default function RemotePane({
 		if (selected.length === 0) return;
 		const names = selected.map(s => s.name).join(', ');
 		if (!window.confirm(`以下のファイルをリモートから削除しますか？\n${names}`)) return;
-		for (const entry of selected) {
-			const rp = entry.path ?? `${currentPath}/${entry.name}`;
-			try {
-				await window.macscp.files.rm(selectedSessionId, rp);
-			} catch (err) {
-				alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
+		if (onDeleteRemote) {
+			const entries = selected.map(e => ({
+				...e,
+				path: e.path ?? `${currentPath}/${e.name}`,
+			}));
+			await onDeleteRemote(selectedSessionId, entries);
+		} else {
+			for (const entry of selected) {
+				const rp = entry.path ?? `${currentPath}/${entry.name}`;
+				try {
+					await window.macscp.files.rm(selectedSessionId, rp);
+				} catch (err) {
+					alert(`削除に失敗しました: ${entry.name}\n${err.message}`);
+				}
 			}
 		}
 		await navigateTo(currentPath);
-	}, [selected, currentPath, selectedSessionId, navigateTo]);
+	}, [selected, currentPath, selectedSessionId, navigateTo, onDeleteRemote]);
 
 	/**
 	 * リネームモーダルを開く
@@ -1064,7 +1073,7 @@ export default function RemotePane({
 									onClick={e => handleRowClick(e, entry)}
 									onDoubleClick={() => handleDoubleClick(entry)}
 									onContextMenu={e => handleContextMenu(e, { ...entry, path: rp })}
-									draggable={!entry.isDirectory}
+									draggable={true}
 									onDragStart={e => handleDragStart(e, { ...entry, path: rp })}
 								>
 									<div style={styles.nameCell(isSelected)}>

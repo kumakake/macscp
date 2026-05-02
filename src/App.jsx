@@ -92,11 +92,22 @@ export default function App() {
 	useEffect(() => {
 		window.macscp.files.onProgress((data) => {
 			setTransferItems(prev =>
-				prev.map(item =>
-					item.name === data.name && item.status === 'transferring'
-						? { ...item, transferred: data.transferred, total: data.total }
-						: item
-				)
+				prev.map(item => {
+					if (item.id !== data.transferId || item.status !== 'transferring') return item;
+					// ディレクトリ転送の場合（kind フィールドあり）
+					if (data.kind !== undefined) {
+						return {
+							...item,
+							currentFile: data.currentFile ?? item.currentFile,
+							processedFiles: data.processedFiles ?? item.processedFiles,
+							totalFiles: data.totalFiles ?? item.totalFiles,
+							transferred: data.processedBytes ?? item.transferred,
+							total: data.totalBytes ?? item.total,
+						};
+					}
+					// ファイル単発転送の場合
+					return { ...item, transferred: data.transferred, total: data.total };
+				})
 			);
 		});
 	}, []);
@@ -105,14 +116,23 @@ export default function App() {
 	 * 転送キューにアイテムを追加する
 	 * @param {string} name - ファイル名
 	 * @param {'upload'|'download'} direction
-	 * @returns {string} - 追加アイテムの ID
+	 * @param {boolean} [isDirectory=false] - ディレクトリ転送かどうか
+	 * @returns {string} - 追加アイテムの UUID
 	 */
-	const addTransferItem = useCallback((name, direction) => {
-		const id = `${Date.now()}-${Math.random()}`;
-		setTransferItems(prev => [
-			...prev,
-			{ id, name, direction, transferred: 0, total: 0, status: 'pending' },
-		]);
+	const addTransferItem = useCallback((name, direction, isDirectory = false) => {
+		const id = globalThis.crypto.randomUUID();
+		setTransferItems(prev => [...prev, {
+			id,
+			name,
+			direction,
+			transferred: 0,
+			total: 0,
+			status: 'pending',
+			isDirectory,
+			currentFile: null,
+			processedFiles: 0,
+			totalFiles: 0,
+		}]);
 		return id;
 	}, []);
 
@@ -140,14 +160,30 @@ export default function App() {
 		}
 		const successNames = [];
 		for (const entry of localEntries) {
-			if (entry.isDirectory) continue;
+			if (entry.isDirectory) {
+				// ディレクトリは再帰アップロード
+				const id = addTransferItem(entry.name, 'upload', true);
+				updateTransferStatus(id, 'transferring');
+				const dest = remotePath
+					? `${remotePath.replace(/\/$/, '')}/${entry.name}`
+					: `/${entry.name}`;
+				try {
+					await window.macscp.files.uploadDirectory(sessionId, entry.path, dest, id);
+					updateTransferStatus(id, 'done');
+					successNames.push(entry.name);
+				} catch (err) {
+					updateTransferStatus(id, 'error');
+					console.error(`ディレクトリアップロードエラー: ${entry.name}`, err);
+				}
+				continue;
+			}
 			const id = addTransferItem(entry.name, 'upload');
 			updateTransferStatus(id, 'transferring');
 			try {
 				const dest = remotePath
 					? `${remotePath.replace(/\/$/, '')}/${entry.name}`
 					: `/${entry.name}`;
-				await window.macscp.files.upload(sessionId, entry.path, dest);
+				await window.macscp.files.upload(sessionId, entry.path, dest, id);
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
@@ -168,12 +204,26 @@ export default function App() {
 	const handleDownload = useCallback(async (remoteEntries, localDir) => {
 		const successNames = [];
 		for (const entry of remoteEntries) {
-			if (entry.isDirectory) continue;
+			if (entry.isDirectory) {
+				// ディレクトリは再帰ダウンロード
+				const id = addTransferItem(entry.name, 'download', true);
+				updateTransferStatus(id, 'transferring');
+				const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
+				try {
+					await window.macscp.files.downloadDirectory(entry.sessionId, entry.remotePath, dest, id);
+					updateTransferStatus(id, 'done');
+					successNames.push(entry.name);
+				} catch (err) {
+					updateTransferStatus(id, 'error');
+					console.error(`ディレクトリダウンロードエラー: ${entry.name}`, err);
+				}
+				continue;
+			}
 			const id = addTransferItem(entry.name, 'download');
 			updateTransferStatus(id, 'transferring');
 			try {
 				const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
-				await window.macscp.files.download(entry.sessionId, entry.remotePath, dest);
+				await window.macscp.files.download(entry.sessionId, entry.remotePath, dest, id);
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
@@ -183,6 +233,44 @@ export default function App() {
 		}
 		if (successNames.length > 0) {
 			setLastTransferBatch({ id: Date.now(), direction: 'download', destPath: localDir, names: successNames });
+		}
+	}, [addTransferItem, updateTransferStatus]);
+
+	/**
+	 * ローカルファイル/ディレクトリを削除し TransferQueue に進捗を通知する
+	 * @param {Array<Object>} entries - 削除対象エントリ（path, name を含む）
+	 */
+	const handleDeleteLocal = useCallback(async (entries) => {
+		for (const entry of entries) {
+			const id = addTransferItem(entry.name, 'delete');
+			updateTransferStatus(id, 'transferring');
+			try {
+				await window.macscp.files.deleteLocal(entry.path);
+				updateTransferStatus(id, 'done');
+			} catch (err) {
+				updateTransferStatus(id, 'error');
+				console.error(`ローカル削除に失敗しました (${entry.name}):`, err);
+			}
+		}
+	}, [addTransferItem, updateTransferStatus]);
+
+	/**
+	 * リモートファイル/ディレクトリを削除し TransferQueue に進捗を通知する
+	 * @param {string} sessionId
+	 * @param {Array<Object>} entries - 削除対象エントリ（path または currentPath+name, name を含む）
+	 */
+	const handleDeleteRemote = useCallback(async (sessionId, entries) => {
+		for (const entry of entries) {
+			const rp = entry.path ?? `${entry.currentPath}/${entry.name}`;
+			const id = addTransferItem(entry.name, 'delete');
+			updateTransferStatus(id, 'transferring');
+			try {
+				await window.macscp.files.rm(sessionId, rp);
+				updateTransferStatus(id, 'done');
+			} catch (err) {
+				updateTransferStatus(id, 'error');
+				console.error(`リモート削除に失敗しました (${entry.name}):`, err);
+			}
 		}
 	}, [addTransferItem, updateTransferStatus]);
 
@@ -254,6 +342,7 @@ export default function App() {
 					onDropFromRemote={handleDropToLocal}
 					dragSource={dragSource}
 					lastTransferBatch={lastTransferBatch}
+					onDeleteLocal={handleDeleteLocal}
 				/>
 
 				<div style={styles.divider} />
@@ -270,6 +359,7 @@ export default function App() {
 					onConnect={connect}
 					onDisconnect={disconnect}
 					lastTransferBatch={lastTransferBatch}
+					onDeleteRemote={handleDeleteRemote}
 				/>
 			</div>
 

@@ -4,7 +4,15 @@
  */
 
 import { Client as FtpClient } from 'basic-ftp';
+import fs from 'fs/promises';
 import path from 'path';
+import {
+	walkLocalDir,
+	walkRemoteDir,
+	assertSafeChild,
+	joinPosix,
+	throttleProgress,
+} from './walk-helpers.js';
 
 /**
  * FTP / FTPS アダプタを生成して返す
@@ -171,6 +179,211 @@ export function createFtpAdapter({ secure = false } = {}) {
 				await client.rename(oldPath, newPath);
 			} catch (err) {
 				throw new Error(`リネームに失敗しました (${oldPath} → ${newPath}): ${err.message}`);
+			}
+		},
+
+		/**
+		 * ローカルディレクトリをリモートへ再帰的にアップロードする
+		 * @param {string} localDir - アップロード元ローカルディレクトリの絶対パス
+		 * @param {string} remoteDir - アップロード先リモートディレクトリのパス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async putDirectory(localDir, remoteDir, onProgress) {
+			// ローカルディレクトリを事前スキャンして転送量を把握する
+			const { files, dirs, totalBytes } = await walkLocalDir(localDir);
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			// CWD を保持してリモートにルートディレクトリを作成する
+			const beforeRoot = await client.pwd();
+			await client.ensureDir(remoteDir);
+			await client.cd(beforeRoot);
+
+			// リモートにサブディレクトリ構造を先に作成する
+			for (const relDir of dirs) {
+				const remotePath = joinPosix(remoteDir, relDir);
+				try {
+					const before = await client.pwd();
+					await client.ensureDir(remotePath);
+					await client.cd(before);
+				} catch (err) {
+					throw new Error(`リモートディレクトリ作成に失敗しました (${remotePath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次アップロードする
+			for (const { relPath, absPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// trackProgress で FTP レベルの転送進捗を取得して throttle 発火する
+				const throttledProgress = onProgress
+					? throttleProgress((info) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred: info.bytes,
+							total: size,
+							processedFiles,
+							processedBytes: fileStartBytes + info.bytes,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				if (throttledProgress) {
+					client.trackProgress((info) => throttledProgress(info));
+				}
+
+				try {
+					await client.uploadFrom(absPath, remotePath);
+				} catch (err) {
+					// トラッキングを解除してからエラーを再スローする
+					client.trackProgress();
+					throw new Error(`ファイルのアップロードに失敗しました (${absPath} → ${remotePath}): ${err.message}`);
+				}
+
+				// トラッキングを解除する
+				client.trackProgress();
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
+			}
+		},
+
+		/**
+		 * リモートディレクトリをローカルへ再帰的にダウンロードする
+		 * @param {string} remoteDir - ダウンロード元リモートディレクトリのパス
+		 * @param {string} localDir - ダウンロード先ローカルディレクトリの絶対パス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async getDirectory(remoteDir, localDir, onProgress) {
+			// walkRemoteDir に渡す list アダプタ（adapter.list が FileEntry を返すためラップする）
+			const listAdapter = {
+				list: async (remotePath) => {
+					const items = await client.list(remotePath);
+					return items.map((item) => ({
+						name: item.name,
+						type: item.type === 2 ? 'd' : 'f', // basic-ftp の FileType.Directory === 2
+						isDirectory: item.isDirectory,
+						size: item.size ?? 0,
+					}));
+				},
+			};
+
+			// リモートディレクトリを事前スキャンして転送量を把握する
+			const { files, dirs, totalBytes } = await walkRemoteDir(listAdapter, remoteDir);
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			// ローカルにディレクトリ構造を先に作成する
+			await fs.mkdir(localDir, { recursive: true });
+			for (const relDir of dirs) {
+				const localAbsPath = path.join(localDir, relDir);
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+				try {
+					await fs.mkdir(localAbsPath, { recursive: true });
+				} catch (err) {
+					throw new Error(`ローカルディレクトリ作成に失敗しました (${localAbsPath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次ダウンロードする
+			for (const { relPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const localAbsPath = path.join(localDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+
+				// trackProgress で FTP レベルの転送進捗を取得して throttle 発火する
+				const throttledProgress = onProgress
+					? throttleProgress((info) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred: info.bytes,
+							total: size,
+							processedFiles,
+							processedBytes: fileStartBytes + info.bytes,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				if (throttledProgress) {
+					client.trackProgress((info) => throttledProgress(info));
+				}
+
+				try {
+					await client.downloadTo(localAbsPath, remotePath);
+				} catch (err) {
+					// トラッキングを解除してからエラーを再スローする
+					client.trackProgress();
+					throw new Error(`ファイルのダウンロードに失敗しました (${remotePath} → ${localAbsPath}): ${err.message}`);
+				}
+
+				// トラッキングを解除する
+				client.trackProgress();
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
 			}
 		},
 	};

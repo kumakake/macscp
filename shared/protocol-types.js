@@ -23,6 +23,20 @@
  */
 
 /**
+ * ディレクトリ転送の進捗情報
+ * @typedef {Object} DirectoryProgress
+ * @property {'file-start'|'file-progress'|'file-done'|'overall'|'error'} kind
+ * @property {string} [currentFile] - dirRoot からの相対パス
+ * @property {number} [transferred] - 当該ファイルの転送済バイト
+ * @property {number} [total] - 当該ファイルの合計バイト
+ * @property {number} processedFiles - 完了ファイル数
+ * @property {number} totalFiles - スキャン済合計ファイル数（不明なら 0）
+ * @property {number} processedBytes - 完了済バイト合計
+ * @property {number} totalBytes - スキャン済合計バイト（不明なら 0）
+ * @property {string} [error]
+ */
+
+/**
  * すべてのプロトコルアダプタが実装すべきインターフェース（JSDoc のみ、実装なし）
  * @typedef {Object} ProtocolAdapter
  * @property {(session: Object, password?: string) => Promise<void>} connect - サーバーへ接続する
@@ -34,6 +48,8 @@
  * @property {(remotePath: string) => Promise<void>} mkdir - リモートにディレクトリを作成する
  * @property {(remotePath: string) => Promise<void>} rm - リモートのファイル/ディレクトリを削除する
  * @property {(oldPath: string, newPath: string) => Promise<void>} rename - リモートのファイル/ディレクトリをリネームする
+ * @property {(localDir: string, remoteDir: string, onProgress?: (info: DirectoryProgress) => void) => Promise<void>} putDirectory
+ * @property {(remoteDir: string, localDir: string, onProgress?: (info: DirectoryProgress) => void) => Promise<void>} getDirectory
  */
 
 export {};

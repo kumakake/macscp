@@ -22,6 +22,7 @@ import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
+import { walkLocalDir, assertSafeChild, joinPosix } from './walk-helpers.js';
 
 /**
  * S3 / MinIO アダプタを生成して返す
@@ -218,6 +219,149 @@ export function createS3Adapter() {
 				await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: oldKey }));
 			} catch (err) {
 				throw new Error(`リネームに失敗しました (${oldPath} → ${newPath}): ${err.message}`);
+			}
+		},
+
+		/**
+		 * ローカルディレクトリを S3 へ再帰的にアップロードする
+		 * S3 は仮想ディレクトリなので中間 mkdir は発行しない（ファイルのみアップロードする）
+		 * @param {string} localDir - アップロード元のローカルディレクトリ絶対パス
+		 * @param {string} remoteDir - アップロード先の S3 プレフィックス（先頭スラッシュは除去する）
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async putDirectory(localDir, remoteDir, onProgress) {
+			try {
+				// ローカルディレクトリを事前スキャンする
+				const { files, totalBytes } = await walkLocalDir(localDir);
+				const totalFiles = files.length;
+				let processedFiles = 0;
+				let processedBytes = 0;
+
+				// overall イベントを通知する
+				if (onProgress) {
+					onProgress({
+						kind: 'overall',
+						totalFiles,
+						totalBytes,
+						processedFiles: 0,
+						processedBytes: 0,
+					});
+				}
+
+				// リモートプレフィックスのスラッシュを正規化する
+				const remotePrefix = remoteDir.replace(/^\//, '').replace(/\/$/, '');
+
+				// ファイルを順次アップロードする（S3 SDK はバイト進捗を標準では流せないためファイル完了単位で報告する）
+				for (const file of files) {
+					const key = remotePrefix
+						? joinPosix(remotePrefix, file.relPath)
+						: file.relPath;
+
+					const body = await fs.readFile(file.absPath);
+					await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body }));
+
+					processedFiles += 1;
+					processedBytes += file.size;
+
+					if (onProgress) {
+						onProgress({
+							kind: 'file-done',
+							file: file.relPath,
+							totalFiles,
+							totalBytes,
+							processedFiles,
+							processedBytes,
+						});
+					}
+				}
+			} catch (err) {
+				throw new Error(`ディレクトリのアップロードに失敗しました (${localDir} → ${remoteDir}): ${err.message}`);
+			}
+		},
+
+		/**
+		 * S3 から指定プレフィックス配下のオブジェクトをローカルへ再帰的にダウンロードする
+		 * ページネーションに対応し、全オブジェクトを列挙してダウンロードする
+		 * @param {string} remoteDir - ダウンロード元の S3 プレフィックス（先頭スラッシュは除去する）
+		 * @param {string} localDir - ダウンロード先のローカルディレクトリ絶対パス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async getDirectory(remoteDir, localDir, onProgress) {
+			try {
+				const prefix = remoteDir.replace(/^\//, '').replace(/\/$/, '');
+				const listPrefix = prefix ? `${prefix}/` : '';
+
+				// ページネーションで全オブジェクトを列挙する
+				const allObjects = [];
+				let continuationToken = undefined;
+				do {
+					const cmd = new ListObjectsV2Command({
+						Bucket: bucket,
+						Prefix: listPrefix,
+						ContinuationToken: continuationToken,
+					});
+					const res = await s3.send(cmd);
+
+					// 空ディレクトリマーカー（末尾スラッシュのキー）は除外する
+					const objects = (res.Contents ?? []).filter((o) => !o.Key.endsWith('/'));
+					allObjects.push(...objects);
+
+					continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+				} while (continuationToken);
+
+				const totalFiles = allObjects.length;
+				const totalBytes = allObjects.reduce((sum, o) => sum + (o.Size ?? 0), 0);
+				let processedFiles = 0;
+				let processedBytes = 0;
+
+				// overall イベントを通知する
+				if (onProgress) {
+					onProgress({
+						kind: 'overall',
+						totalFiles,
+						totalBytes,
+						processedFiles: 0,
+						processedBytes: 0,
+					});
+				}
+
+				// ローカルのルートディレクトリを先行作成する
+				await fs.mkdir(localDir, { recursive: true });
+
+				// オブジェクトを順次ダウンロードする
+				for (const obj of allObjects) {
+					// キーからプレフィックスを除去して相対パスを求める
+					const relPath = listPrefix ? obj.Key.slice(listPrefix.length) : obj.Key;
+					const localAbsPath = path.join(localDir, relPath);
+
+					// パストラバーサル防止チェック
+					assertSafeChild(localDir, localAbsPath);
+
+					// 中間ディレクトリを作成する
+					await fs.mkdir(path.dirname(localAbsPath), { recursive: true });
+
+					// オブジェクトをダウンロードしてファイルに書き込む
+					const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: obj.Key }));
+					await pipeline(res.Body, createWriteStream(localAbsPath));
+
+					processedFiles += 1;
+					processedBytes += obj.Size ?? 0;
+
+					if (onProgress) {
+						onProgress({
+							kind: 'file-done',
+							file: relPath,
+							totalFiles,
+							totalBytes,
+							processedFiles,
+							processedBytes,
+						});
+					}
+				}
+			} catch (err) {
+				throw new Error(`ディレクトリのダウンロードに失敗しました (${remoteDir} → ${localDir}): ${err.message}`);
 			}
 		},
 	};

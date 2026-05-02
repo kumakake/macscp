@@ -12,7 +12,14 @@ const require = createRequire(import.meta.url);
 const { Client } = require('ssh2');
 
 import path from 'path';
+import fs from 'fs/promises';
 import { buildConnectOptions } from './connect-options.js';
+import {
+	walkLocalDir,
+	assertSafeChild,
+	joinPosix,
+	throttleProgress,
+} from './walk-helpers.js';
 
 /**
  * ssh2 Client に接続して Promise を返す
@@ -381,6 +388,214 @@ export function createScpAdapter() {
 				await sftpRenameFile(sftp, oldPath, newPath);
 			} catch (err) {
 				throw new Error(`リネームに失敗しました (${oldPath} → ${newPath}): ${err.message}`);
+			}
+		},
+
+		/**
+		 * ローカルディレクトリをリモートへ再帰的にアップロードする
+		 * @param {string} localDir - アップロード元ローカルディレクトリの絶対パス
+		 * @param {string} remoteDir - アップロード先リモートディレクトリのパス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async putDirectory(localDir, remoteDir, onProgress) {
+			// ローカルディレクトリを事前スキャンして転送量を把握する
+			const { files, dirs, totalBytes } = await walkLocalDir(localDir);
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			const c = await ensureConnected();
+			const sftp = await openSftp(c);
+
+			// リモートにディレクトリ構造を先に作成する
+			await sftpMkdirP(sftp, remoteDir);
+			for (const relDir of dirs) {
+				const remotePath = joinPosix(remoteDir, relDir);
+				try {
+					await sftpMkdirP(sftp, remotePath);
+				} catch (err) {
+					throw new Error(`リモートディレクトリ作成に失敗しました (${remotePath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次アップロードする
+			for (const { relPath, absPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// 進捗コールバックを throttle して高頻度の呼び出しを間引く
+				const throttledProgress = onProgress
+					? throttleProgress((transferred, total) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred,
+							total,
+							processedFiles,
+							processedBytes: fileStartBytes + transferred,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				try {
+					await sftpFastPut(sftp, absPath, remotePath, throttledProgress
+						? (transferred, total) => throttledProgress(transferred, total > 0 ? total : size)
+						: null,
+					);
+				} catch (err) {
+					throw new Error(`ファイルのアップロードに失敗しました (${absPath} → ${remotePath}): ${err.message}`);
+				}
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
+			}
+		},
+
+		/**
+		 * リモートディレクトリをローカルへ再帰的にダウンロードする
+		 * @param {string} remoteDir - ダウンロード元リモートディレクトリのパス
+		 * @param {string} localDir - ダウンロード先ローカルディレクトリの絶対パス
+		 * @param {(progress: Object) => void} [onProgress] - 進捗コールバック
+		 * @returns {Promise<void>}
+		 */
+		async getDirectory(remoteDir, localDir, onProgress) {
+			const c = await ensureConnected();
+			const sftp = await openSftp(c);
+
+			// scp.js 独自のリモートディレクトリ再帰スキャン
+			// （sftpReaddir + sftpLstat を直接利用して adapter.list 形式に依存しない）
+			const files = [];
+			const dirs = [];
+			let totalBytes = 0;
+
+			/**
+			 * リモートディレクトリを再帰的にスキャンする
+			 * @param {string} absRemote - 現在処理中のリモートディレクトリ絶対パス
+			 * @param {string} relBase - ルートからの相対パスプレフィックス
+			 */
+			async function scanRemote(absRemote, relBase) {
+				const items = await sftpReaddir(sftp, absRemote);
+				for (const item of items) {
+					const relPath = relBase ? relBase + '/' + item.filename : item.filename;
+					const itemRemotePath = absRemote.replace(/\/$/, '') + '/' + item.filename;
+					const attrs = await sftpLstat(sftp, itemRemotePath);
+					if (isDirectory(attrs.mode)) {
+						dirs.push(relPath);
+						await scanRemote(itemRemotePath, relPath);
+					} else {
+						const size = attrs.size ?? 0;
+						files.push({ relPath, size });
+						totalBytes += size;
+					}
+				}
+			}
+
+			await scanRemote(remoteDir, '');
+
+			const totalFiles = files.length;
+			let processedFiles = 0;
+			let processedBytes = 0;
+
+			// 開始通知
+			if (onProgress) {
+				onProgress({
+					kind: 'overall',
+					processedFiles: 0,
+					totalFiles,
+					processedBytes: 0,
+					totalBytes,
+				});
+			}
+
+			// ローカルにディレクトリ構造を先に作成する
+			await fs.mkdir(localDir, { recursive: true });
+			for (const relDir of dirs) {
+				const localAbsPath = path.join(localDir, relDir);
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+				try {
+					await fs.mkdir(localAbsPath, { recursive: true });
+				} catch (err) {
+					throw new Error(`ローカルディレクトリ作成に失敗しました (${localAbsPath}): ${err.message}`);
+				}
+			}
+
+			// ファイルを順次ダウンロードする
+			for (const { relPath, size } of files) {
+				const remotePath = joinPosix(remoteDir, relPath);
+				const localAbsPath = path.join(localDir, relPath);
+				const currentFile = relPath;
+				const fileStartBytes = processedBytes;
+
+				// パストラバーサル攻撃を防止する
+				assertSafeChild(localDir, localAbsPath);
+
+				// 進捗コールバックを throttle して高頻度の呼び出しを間引く
+				const throttledProgress = onProgress
+					? throttleProgress((transferred, total) => {
+						onProgress({
+							kind: 'file-progress',
+							currentFile,
+							transferred,
+							total,
+							processedFiles,
+							processedBytes: fileStartBytes + transferred,
+							totalFiles,
+							totalBytes,
+						});
+					})
+					: null;
+
+				try {
+					await sftpFastGet(sftp, remotePath, localAbsPath, throttledProgress
+						? (transferred, total) => throttledProgress(transferred, total > 0 ? total : size)
+						: null,
+					);
+				} catch (err) {
+					throw new Error(`ファイルのダウンロードに失敗しました (${remotePath} → ${localAbsPath}): ${err.message}`);
+				}
+
+				// 1 ファイル完了後に進捗を通知する
+				processedFiles += 1;
+				processedBytes += size;
+
+				if (onProgress) {
+					onProgress({
+						kind: 'file-done',
+						currentFile,
+						processedFiles,
+						totalFiles,
+						processedBytes,
+						totalBytes,
+					});
+				}
 			}
 		},
 	};

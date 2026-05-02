@@ -70,14 +70,34 @@ const styles = {
 		textAlign: 'center',
 		flexShrink: 0,
 	},
-	fileName: {
+	fileInfo: {
 		flex: 1,
+		display: 'flex',
+		flexDirection: 'column',
+		justifyContent: 'center',
+		minWidth: 0,
+		overflow: 'hidden',
+	},
+	fileName: {
 		fontSize: '12px',
 		color: '#222',
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
-		minWidth: 0,
+	},
+	fileCount: {
+		fontSize: '11px',
+		color: '#555',
+		flexShrink: 0,
+		marginLeft: '4px',
+	},
+	currentFile: {
+		fontSize: '10px',
+		color: '#888',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		marginTop: '1px',
 	},
 	progressWrap: {
 		width: '120px',
@@ -87,12 +107,13 @@ const styles = {
 		overflow: 'hidden',
 		flexShrink: 0,
 	},
-	progressBar: (pct, status) => ({
+	progressBar: (pct, status, isIndeterminate) => ({
 		height: '100%',
-		width: `${pct}%`,
-		background: status === 'error' ? '#e03030' : status === 'done' ? '#888' : '#0064d2',
+		width: isIndeterminate ? '100%' : `${pct}%`,
+		background: status === 'error' ? '#e03030' : status === 'done' ? '#888' : isIndeterminate ? '#e07820' : '#0064d2',
 		borderRadius: '3px',
-		transition: 'width 0.2s',
+		transition: isIndeterminate ? 'none' : 'width 0.2s',
+		opacity: isIndeterminate ? 0.7 : 1,
 	}),
 	sizeText: {
 		fontSize: '11px',
@@ -119,10 +140,18 @@ const styles = {
 	}),
 };
 
-/** ステータスの日本語ラベル */
+/** ステータスの日本語ラベル（direction ごとに上書き可能） */
 const STATUS_LABELS = {
 	pending: '待機中',
 	transferring: '転送中',
+	done: '完了',
+	error: 'エラー',
+};
+
+/** direction=delete 時のステータス日本語ラベル */
+const DELETE_STATUS_LABELS = {
+	pending: '待機中',
+	transferring: '削除中...',
 	done: '完了',
 	error: 'エラー',
 };
@@ -148,35 +177,61 @@ export default function TransferQueue({ items, onClear }) {
 				) : (
 					items.map((item) => {
 						const isDone = item.status === 'done' || item.status === 'error';
+						const isDelete = item.direction === 'delete';
+						const isIndeterminate = isDelete && item.status === 'transferring';
 						const pct = item.total > 0
 							? Math.min(100, Math.round((item.transferred / item.total) * 100))
 							: (item.status === 'done' ? 100 : 0);
+						const labels = isDelete ? DELETE_STATUS_LABELS : STATUS_LABELS;
+						const directionTitle = isDelete ? '削除' : item.direction === 'upload' ? 'アップロード' : 'ダウンロード';
+						const directionIcon = isDelete ? '🗑' : item.direction === 'upload' ? '↑' : '↓';
 
 						return (
 							<div key={item.id} style={styles.item(isDone)}>
 								{/* 方向アイコン */}
-								<span style={styles.direction} title={item.direction === 'upload' ? 'アップロード' : 'ダウンロード'}>
-									{item.direction === 'upload' ? '↑' : '↓'}
+								<span style={styles.direction} title={directionTitle}>
+									{directionIcon}
 								</span>
 
-								{/* ファイル名 */}
-								<span style={styles.fileName} title={item.name}>
-									{item.name}
-								</span>
+								{/* ファイル名（ディレクトリ転送の場合は追加情報あり） */}
+								<div style={styles.fileInfo}>
+									<div style={{ display: 'flex', alignItems: 'baseline', minWidth: 0 }}>
+										{item.isDirectory && (
+											<span style={{ marginRight: '4px', fontSize: '12px' }}>📁</span>
+										)}
+										<span style={styles.fileName} title={item.name}>
+											{item.name}
+										</span>
+										{item.isDirectory && item.totalFiles > 0 && (
+											<span style={styles.fileCount}>
+												({item.processedFiles ?? 0}/{item.totalFiles} ファイル)
+											</span>
+										)}
+									</div>
+									{item.isDirectory && item.currentFile && (
+										<div style={styles.currentFile} title={item.currentFile}>
+											処理中: {item.currentFile}
+										</div>
+									)}
+								</div>
 
 								{/* プログレスバー */}
 								<div style={styles.progressWrap}>
-									<div style={styles.progressBar(pct, item.status)} />
+									<div style={styles.progressBar(pct, item.status, isIndeterminate)} />
 								</div>
 
-								{/* サイズ表示 */}
-								<span style={styles.sizeText}>
-									{formatSize(item.transferred)} / {formatSize(item.total)}
-								</span>
+								{/* サイズ表示（削除中は非表示） */}
+								{!isDelete ? (
+									<span style={styles.sizeText}>
+										{formatSize(item.transferred)} / {formatSize(item.total)}
+									</span>
+								) : (
+									<span style={{ ...styles.sizeText, color: '#aaa' }}>—</span>
+								)}
 
 								{/* ステータスバッジ */}
 								<span style={styles.statusBadge(item.status)}>
-									{STATUS_LABELS[item.status] ?? item.status}
+									{labels[item.status] ?? item.status}
 								</span>
 							</div>
 						);
