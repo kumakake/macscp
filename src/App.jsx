@@ -132,6 +132,7 @@ export default function App() {
 			currentFile: null,
 			processedFiles: 0,
 			totalFiles: 0,
+			error: null,
 		}]);
 		return id;
 	}, []);
@@ -140,10 +141,13 @@ export default function App() {
 	 * 転送キューのアイテムのステータスを更新する
 	 * @param {string} id
 	 * @param {string} status
+	 * @param {Error|null} [error] - エラー時の例外オブジェクト
 	 */
-	const updateTransferStatus = useCallback((id, status) => {
+	const updateTransferStatus = useCallback((id, status, error = null) => {
 		setTransferItems(prev =>
-			prev.map(item => item.id === id ? { ...item, status } : item)
+			prev.map(item => item.id === id
+				? { ...item, status, error: error ? { message: error.message, stack: error.stack } : item.error }
+				: item)
 		);
 	}, []);
 
@@ -172,7 +176,7 @@ export default function App() {
 					updateTransferStatus(id, 'done');
 					successNames.push(entry.name);
 				} catch (err) {
-					updateTransferStatus(id, 'error');
+					updateTransferStatus(id, 'error', err);
 					console.error(`ディレクトリアップロードエラー: ${entry.name}`, err);
 				}
 				continue;
@@ -187,7 +191,7 @@ export default function App() {
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
-				updateTransferStatus(id, 'error');
+				updateTransferStatus(id, 'error', err);
 				console.error(`アップロードに失敗しました (${entry.name}):`, err);
 			}
 		}
@@ -214,7 +218,7 @@ export default function App() {
 					updateTransferStatus(id, 'done');
 					successNames.push(entry.name);
 				} catch (err) {
-					updateTransferStatus(id, 'error');
+					updateTransferStatus(id, 'error', err);
 					console.error(`ディレクトリダウンロードエラー: ${entry.name}`, err);
 				}
 				continue;
@@ -227,7 +231,7 @@ export default function App() {
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
-				updateTransferStatus(id, 'error');
+				updateTransferStatus(id, 'error', err);
 				console.error(`ダウンロードに失敗しました (${entry.name}):`, err);
 			}
 		}
@@ -248,7 +252,7 @@ export default function App() {
 				await window.macscp.files.deleteLocal(entry.path);
 				updateTransferStatus(id, 'done');
 			} catch (err) {
-				updateTransferStatus(id, 'error');
+				updateTransferStatus(id, 'error', err);
 				console.error(`ローカル削除に失敗しました (${entry.name}):`, err);
 			}
 		}
@@ -268,7 +272,7 @@ export default function App() {
 				await window.macscp.files.rm(sessionId, rp);
 				updateTransferStatus(id, 'done');
 			} catch (err) {
-				updateTransferStatus(id, 'error');
+				updateTransferStatus(id, 'error', err);
 				console.error(`リモート削除に失敗しました (${entry.name}):`, err);
 			}
 		}

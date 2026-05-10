@@ -179,6 +179,16 @@ const styles = {
 		color: isSelected ? '#dde' : '#aaa',
 		fontFamily: 'monospace',
 	}),
+	ownerCell: (isSelected) => ({
+		flex: 1,
+		fontSize: '11px',
+		padding: '2px 8px',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		color: isSelected ? '#dde' : '#888',
+		fontFamily: 'monospace',
+	}),
 	errorBar: {
 		background: '#fdd',
 		color: '#c00',
@@ -1058,6 +1068,7 @@ export default function RemotePane({
 							更新日時{sortKey === 'modifiedAt' ? (sortOrder === 'asc' ? ' ▲' : ' ▼') : ''}
 						</div>
 						<div style={styles.headerCell(1)}>パーミッション</div>
+						<div style={styles.headerCell(1)}>所有者</div>
 					</div>
 
 					{/* ファイル一覧 */}
@@ -1096,6 +1107,11 @@ export default function RemotePane({
 									</div>
 									<div style={styles.permCell(isSelected)}>
 										{entry.permissions || '—'}
+									</div>
+									<div style={styles.ownerCell(isSelected)}>
+										{entry.owner
+											? (entry.group ? `${entry.owner}:${entry.group}` : entry.owner)
+											: '—'}
 									</div>
 								</div>
 							);

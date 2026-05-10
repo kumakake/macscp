@@ -101,6 +101,8 @@ export function createWebdavAdapter() {
 					size: item.size ?? 0,
 					modifiedAt: item.lastmod ? new Date(item.lastmod) : null,
 					permissions: '',
+					owner: '',
+					group: '',
 				}));
 			} catch (err) {
 				throw new Error(`ディレクトリ一覧の取得に失敗しました (${remotePath}): ${err.message}`);

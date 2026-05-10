@@ -33,6 +33,8 @@ function toFileEntry(dirPath, item) {
 		size: item.size ?? 0,
 		modifiedAt: item.modifyTime ? new Date(item.modifyTime) : null,
 		permissions: item.longname ? item.longname.slice(0, 10) : '',
+		owner: item.owner ?? '',
+		group: item.group ?? '',
 	};
 }
 

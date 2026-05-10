@@ -12,6 +12,8 @@
  * @property {number} size - ファイルサイズ（バイト）
  * @property {Date} modifiedAt - 最終更新日時
  * @property {string} permissions - パーミッション文字列（例: '-rw-r--r--'）
+ * @property {string} owner - 所有者名または UID 文字列（取得不可の場合は空文字列）
+ * @property {string} group - グループ名または GID 文字列（取得不可の場合は空文字列）
  */
 
 /**

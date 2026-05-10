@@ -118,6 +118,16 @@ const styles = {
 		whiteSpace: 'nowrap',
 		color: isSelected ? '#dde' : '#888',
 	}),
+	ownerCell: (isSelected) => ({
+		flex: 1,
+		fontSize: '11px',
+		padding: '2px 8px',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		color: isSelected ? '#dde' : '#888',
+		fontFamily: 'monospace',
+	}),
 	errorBar: {
 		background: '#fdd',
 		color: '#c00',
@@ -705,6 +715,7 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 				>
 					更新日時{sortKey === 'modifiedAt' ? (sortOrder === 'asc' ? ' ▲' : ' ▼') : ''}
 				</div>
+				<div style={styles.headerCell(1)}>所有者</div>
 			</div>
 
 			{/* ファイル一覧 */}
@@ -730,6 +741,11 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 							</div>
 							<div style={styles.dateCell(isSelected)}>
 								{formatDate(entry.modifiedAt)}
+							</div>
+							<div style={styles.ownerCell(isSelected)}>
+								{entry.owner
+									? (entry.group ? `${entry.owner}:${entry.group}` : entry.owner)
+									: '—'}
 							</div>
 						</div>
 					);

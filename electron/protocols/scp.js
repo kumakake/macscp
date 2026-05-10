@@ -282,6 +282,8 @@ export function createScpAdapter() {
 					size: attrs.size,
 					modifiedAt: new Date(attrs.mtime * 1000),
 					permissions: modeToPermStr(attrs.mode),
+					owner: attrs.uid != null ? String(attrs.uid) : '',
+					group: attrs.gid != null ? String(attrs.gid) : '',
 				}));
 			} catch (err) {
 				throw new Error(`ディレクトリ一覧の取得に失敗しました (${remotePath}): ${err.message}`);

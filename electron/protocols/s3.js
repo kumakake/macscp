@@ -96,6 +96,8 @@ export function createS3Adapter() {
 					size: 0,
 					modifiedAt: null,
 					permissions: '',
+					owner: '',
+					group: '',
 				}));
 
 				// 現在のプレフィックス自体（空オブジェクト）は除外する
@@ -109,6 +111,8 @@ export function createS3Adapter() {
 						size: o.Size ?? 0,
 						modifiedAt: o.LastModified ?? null,
 						permissions: '',
+						owner: '',
+						group: '',
 					}));
 
 				return [...dirs, ...files];

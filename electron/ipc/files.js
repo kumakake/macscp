@@ -9,8 +9,54 @@ import { getSession } from '../sessions/store.js';
 import { getCredential } from '../credentials/keytar.js';
 import fs from 'fs/promises';
 import { unlink } from 'fs/promises';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
+
+const execFileAsync = promisify(execFile);
+
+/** uid → username のキャッシュ（起動後初回 listLocal 時に構築） */
+let uidMap = null;
+/** gid → groupname のキャッシュ */
+let gidMap = null;
+
+/**
+ * UID/GID → 名前のマップを構築する。macOS は dscl、Linux は /etc/passwd を使用。
+ * 一度構築したらキャッシュを返す。
+ */
+async function ensureIdMaps() {
+	if (uidMap) return;
+	uidMap = new Map();
+	gidMap = new Map();
+	try {
+		// macOS: dscl . -list /Users UniqueID → "username\t<uid>" 形式
+		const { stdout: usersOut } = await execFileAsync('dscl', ['.', '-list', '/Users', 'UniqueID']);
+		for (const line of usersOut.split('\n')) {
+			const parts = line.trim().split(/\s+/);
+			if (parts.length === 2) uidMap.set(parts[1], parts[0]);
+		}
+		const { stdout: groupsOut } = await execFileAsync('dscl', ['.', '-list', '/Groups', 'PrimaryGroupID']);
+		for (const line of groupsOut.split('\n')) {
+			const parts = line.trim().split(/\s+/);
+			if (parts.length === 2) gidMap.set(parts[1], parts[0]);
+		}
+	} catch {
+		// dscl が使えない環境（Linux 等）では /etc/passwd にフォールバック
+		try {
+			const passwd = await fs.readFile('/etc/passwd', 'utf8');
+			for (const line of passwd.split('\n')) {
+				const p = line.split(':');
+				if (p.length >= 3 && p[0] && p[2]) uidMap.set(p[2], p[0]);
+			}
+			const group = await fs.readFile('/etc/group', 'utf8');
+			for (const line of group.split('\n')) {
+				const p = line.split(':');
+				if (p.length >= 3 && p[0] && p[2]) gidMap.set(p[2], p[0]);
+			}
+		} catch { /* フォールバックも失敗した場合はマップを空のまま維持（UID 数値表示） */ }
+	}
+}
 
 /**
  * パスが許可されたルート配下にあることを検証する
@@ -72,12 +118,15 @@ export function registerFilesIpc() {
 	ipcMain.handle('files:listLocal', async (_, dirPath) => {
 		assertSafePath(dirPath, [os.homedir(), '/Volumes', os.tmpdir(), '/']);
 		try {
+			await ensureIdMaps();
 			const entries = await fs.readdir(dirPath, { withFileTypes: true });
 			return Promise.all(entries.map(async (e) => {
 				const fullPath = path.join(dirPath, e.name);
 				let size = 0;
 				let modifiedAt = null;
 				let permissions = '';
+				let owner = '';
+				let group = '';
 				try {
 					const stat = await fs.stat(fullPath);
 					size = stat.size;
@@ -88,6 +137,8 @@ export function registerFilesIpc() {
 						m & 0o040 ? 'r' : '-', m & 0o020 ? 'w' : '-', m & 0o010 ? 'x' : '-',
 						m & 0o004 ? 'r' : '-', m & 0o002 ? 'w' : '-', m & 0o001 ? 'x' : '-',
 					].join('');
+					owner = uidMap.get(String(stat.uid)) ?? String(stat.uid);
+					group = gidMap.get(String(stat.gid)) ?? String(stat.gid);
 				} catch { /* アクセス不可の場合はフォールバック値を維持 */ }
 				return {
 					name: e.name,
@@ -96,6 +147,8 @@ export function registerFilesIpc() {
 					size,
 					modifiedAt,
 					permissions,
+					owner,
+					group,
 				};
 			}));
 		} catch (err) {

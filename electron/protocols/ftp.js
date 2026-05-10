@@ -70,6 +70,8 @@ export function createFtpAdapter({ secure = false } = {}) {
 					size: item.size ?? 0,
 					modifiedAt: item.modifiedAt ?? null,
 					permissions: '',
+					owner: '',
+					group: '',
 				}));
 			} catch (err) {
 				throw new Error(`ディレクトリ一覧の取得に失敗しました (${remotePath}): ${err.message}`);
