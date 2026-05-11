@@ -264,6 +264,7 @@ export default function RemotePane({
 	const { entries, currentPath, loading, error, loadRemote } = useFileList();
 	const [selectedSessionId, setSelectedSessionId] = useState('');
 	const [selected, setSelected] = useState([]);
+	const [anchorIndex, setAnchorIndex] = useState(null);
 	const [pathInput, setPathInput] = useState('');
 	const [connecting, setConnecting] = useState(false);
 	const [connectError, setConnectError] = useState(null);
@@ -388,6 +389,7 @@ export default function RemotePane({
 	useEffect(() => {
 		setPathInput(currentPath);
 		setSelected([]);
+		setAnchorIndex(null);
 	}, [currentPath]);
 
 	/** アップロード完了時: 現在のパスが転送先かつセッションが一致なら自動リロード */
@@ -476,20 +478,37 @@ export default function RemotePane({
 	};
 
 	/**
-	 * 行クリック時の選択処理（⌘クリックで複数選択）
+	 * 行クリック時の選択処理（⌘クリックでトグル、Shiftクリックで範囲選択）
 	 * @param {React.MouseEvent} e
 	 * @param {Object} entry
+	 * @param {number} index - sortedEntries 内のインデックス
 	 */
-	const handleRowClick = (e, entry) => {
+	const handleRowClick = (e, entry, index) => {
+		if (e.shiftKey && anchorIndex !== null) {
+			const from = Math.min(anchorIndex, index);
+			const to = Math.max(anchorIndex, index);
+			const range = sortedEntries.slice(from, to + 1);
+			if (e.metaKey || e.ctrlKey) {
+				setSelected(prev => {
+					const names = new Set(prev.map(s => s.name));
+					return [...prev, ...range.filter(r => !names.has(r.name))];
+				});
+			} else {
+				setSelected(range);
+			}
+			return;
+		}
 		if (e.metaKey || e.ctrlKey) {
 			setSelected(prev =>
 				prev.some(s => s.name === entry.name)
 					? prev.filter(s => s.name !== entry.name)
 					: [...prev, entry]
 			);
-		} else {
-			setSelected([entry]);
+			setAnchorIndex(index);
+			return;
 		}
+		setSelected([entry]);
+		setAnchorIndex(index);
 	};
 
 	/**
@@ -603,6 +622,11 @@ export default function RemotePane({
 			return sortOrder === 'asc' ? cmp : -cmp;
 		});
 	}, [entries, sortKey, sortOrder]);
+
+	/** ソート変更時に anchorIndex をリセット（選択は維持） */
+	useEffect(() => {
+		setAnchorIndex(null);
+	}, [sortKey, sortOrder]);
 
 	/**
 	 * リモートにディレクトリを作成する
@@ -1073,7 +1097,7 @@ export default function RemotePane({
 
 					{/* ファイル一覧 */}
 					<div style={styles.tableBody}>
-						{sortedEntries.map((entry) => {
+						{sortedEntries.map((entry, index) => {
 							const isSelected = selected.some(s => s.name === entry.name);
 							const rp = entry.path ?? `${currentPath}/${entry.name}`;
 							const isEditing = !entry.isDirectory && !!editingFiles[rp];
@@ -1081,7 +1105,7 @@ export default function RemotePane({
 								<div
 									key={entry.name}
 									style={styles.row(isSelected, false)}
-									onClick={e => handleRowClick(e, entry)}
+									onClick={e => handleRowClick(e, entry, index)}
 									onDoubleClick={() => handleDoubleClick(entry)}
 									onContextMenu={e => handleContextMenu(e, { ...entry, path: rp })}
 									draggable={true}

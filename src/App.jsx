@@ -3,6 +3,9 @@ import { useConnection } from './hooks/useMacscpApi.js';
 import LocalPane from './panes/LocalPane.jsx';
 import RemotePane from './panes/RemotePane.jsx';
 import TransferQueue from './transfer/TransferQueue.jsx';
+import { runWithConcurrency } from './transfer/run-with-concurrency.js';
+
+const TRANSFER_CONCURRENCY = 3;
 
 const styles = {
 	root: {
@@ -163,38 +166,26 @@ export default function App() {
 			return;
 		}
 		const successNames = [];
-		for (const entry of localEntries) {
-			if (entry.isDirectory) {
-				// ディレクトリは再帰アップロード
-				const id = addTransferItem(entry.name, 'upload', true);
-				updateTransferStatus(id, 'transferring');
-				const dest = remotePath
-					? `${remotePath.replace(/\/$/, '')}/${entry.name}`
-					: `/${entry.name}`;
-				try {
-					await window.macscp.files.uploadDirectory(sessionId, entry.path, dest, id);
-					updateTransferStatus(id, 'done');
-					successNames.push(entry.name);
-				} catch (err) {
-					updateTransferStatus(id, 'error', err);
-					console.error(`ディレクトリアップロードエラー: ${entry.name}`, err);
-				}
-				continue;
-			}
-			const id = addTransferItem(entry.name, 'upload');
+		await runWithConcurrency(localEntries, TRANSFER_CONCURRENCY, async (entry) => {
+			const isDir = entry.isDirectory;
+			const id = addTransferItem(entry.name, 'upload', isDir);
 			updateTransferStatus(id, 'transferring');
+			const dest = remotePath
+				? `${remotePath.replace(/\/$/, '')}/${entry.name}`
+				: `/${entry.name}`;
 			try {
-				const dest = remotePath
-					? `${remotePath.replace(/\/$/, '')}/${entry.name}`
-					: `/${entry.name}`;
-				await window.macscp.files.upload(sessionId, entry.path, dest, id);
+				if (isDir) {
+					await window.macscp.files.uploadDirectory(sessionId, entry.path, dest, id);
+				} else {
+					await window.macscp.files.upload(sessionId, entry.path, dest, id);
+				}
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
 				updateTransferStatus(id, 'error', err);
-				console.error(`アップロードに失敗しました (${entry.name}):`, err);
+				console.error(`アップロード失敗 (${entry.name}):`, err);
 			}
-		}
+		});
 		if (successNames.length > 0) {
 			setLastTransferBatch({ id: Date.now(), direction: 'upload', destPath: remotePath, sessionId, names: successNames });
 		}
@@ -207,34 +198,24 @@ export default function App() {
 	 */
 	const handleDownload = useCallback(async (remoteEntries, localDir) => {
 		const successNames = [];
-		for (const entry of remoteEntries) {
-			if (entry.isDirectory) {
-				// ディレクトリは再帰ダウンロード
-				const id = addTransferItem(entry.name, 'download', true);
-				updateTransferStatus(id, 'transferring');
-				const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
-				try {
-					await window.macscp.files.downloadDirectory(entry.sessionId, entry.remotePath, dest, id);
-					updateTransferStatus(id, 'done');
-					successNames.push(entry.name);
-				} catch (err) {
-					updateTransferStatus(id, 'error', err);
-					console.error(`ディレクトリダウンロードエラー: ${entry.name}`, err);
-				}
-				continue;
-			}
-			const id = addTransferItem(entry.name, 'download');
+		await runWithConcurrency(remoteEntries, TRANSFER_CONCURRENCY, async (entry) => {
+			const isDir = entry.isDirectory;
+			const id = addTransferItem(entry.name, 'download', isDir);
 			updateTransferStatus(id, 'transferring');
+			const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
 			try {
-				const dest = `${localDir.replace(/\/$/, '')}/${entry.name}`;
-				await window.macscp.files.download(entry.sessionId, entry.remotePath, dest, id);
+				if (isDir) {
+					await window.macscp.files.downloadDirectory(entry.sessionId, entry.remotePath, dest, id);
+				} else {
+					await window.macscp.files.download(entry.sessionId, entry.remotePath, dest, id);
+				}
 				updateTransferStatus(id, 'done');
 				successNames.push(entry.name);
 			} catch (err) {
 				updateTransferStatus(id, 'error', err);
-				console.error(`ダウンロードに失敗しました (${entry.name}):`, err);
+				console.error(`ダウンロード失敗 (${entry.name}):`, err);
 			}
-		}
+		});
 		if (successNames.length > 0) {
 			setLastTransferBatch({ id: Date.now(), direction: 'download', destPath: localDir, names: successNames });
 		}

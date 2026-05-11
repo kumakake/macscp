@@ -174,6 +174,7 @@ const styles = {
 export default function LocalPane({ clipboard, onClipboardChange, onDragStart, onDropFromRemote, dragSource, lastTransferBatch, onDeleteLocal }) {
 	const { entries, currentPath, loading, error, loadLocal } = useFileList();
 	const [selected, setSelected] = useState([]);
+	const [anchorIndex, setAnchorIndex] = useState(null);
 	const [pathInput, setPathInput] = useState('');
 	const [isDragOver, setIsDragOver] = useState(false);
 	const paneRef = useRef(null);
@@ -207,6 +208,7 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 	useEffect(() => {
 		setPathInput(currentPath);
 		setSelected([]);
+		setAnchorIndex(null);
 	}, [currentPath]);
 
 	/** ダウンロード完了時: 現在のパスが転送先なら自動リロード */
@@ -258,20 +260,37 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 	};
 
 	/**
-	 * 行クリック時の選択処理（⌘クリックで複数選択）
+	 * 行クリック時の選択処理（⌘クリックでトグル、Shiftクリックで範囲選択）
 	 * @param {React.MouseEvent} e
 	 * @param {Object} entry
+	 * @param {number} index - sortedEntries 内のインデックス
 	 */
-	const handleRowClick = (e, entry) => {
+	const handleRowClick = (e, entry, index) => {
+		if (e.shiftKey && anchorIndex !== null) {
+			const from = Math.min(anchorIndex, index);
+			const to = Math.max(anchorIndex, index);
+			const range = sortedEntries.slice(from, to + 1);
+			if (e.metaKey || e.ctrlKey) {
+				setSelected(prev => {
+					const names = new Set(prev.map(s => s.name));
+					return [...prev, ...range.filter(r => !names.has(r.name))];
+				});
+			} else {
+				setSelected(range);
+			}
+			return;
+		}
 		if (e.metaKey || e.ctrlKey) {
 			setSelected(prev =>
 				prev.some(s => s.name === entry.name)
 					? prev.filter(s => s.name !== entry.name)
 					: [...prev, entry]
 			);
-		} else {
-			setSelected([entry]);
+			setAnchorIndex(index);
+			return;
 		}
+		setSelected([entry]);
+		setAnchorIndex(index);
 	};
 
 	/**
@@ -384,6 +403,11 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 			return sortOrder === 'asc' ? cmp : -cmp;
 		});
 	}, [entries, sortKey, sortOrder]);
+
+	/** ソート変更時に anchorIndex をリセット（選択は維持） */
+	useEffect(() => {
+		setAnchorIndex(null);
+	}, [sortKey, sortOrder]);
 
 	/**
 	 * ローカルにディレクトリを作成する
@@ -720,13 +744,13 @@ export default function LocalPane({ clipboard, onClipboardChange, onDragStart, o
 
 			{/* ファイル一覧 */}
 			<div style={styles.tableBody}>
-				{sortedEntries.map((entry) => {
+				{sortedEntries.map((entry, index) => {
 					const isSelected = selected.some(s => s.name === entry.name);
 					return (
 						<div
 							key={entry.name}
 							style={styles.row(isSelected, false)}
-							onClick={e => handleRowClick(e, entry)}
+							onClick={e => handleRowClick(e, entry, index)}
 							onDoubleClick={() => handleDoubleClick(entry)}
 							onContextMenu={e => handleContextMenu(e, entry)}
 							draggable={true}
